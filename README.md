@@ -16,4 +16,4 @@ This project aims to employ diverse endmember extraction methods to accurately m
 
 If you want to learn more about spectral features extraction, you can visit my [Notion website](https://djelilyasminaferiel.notion.site/Extraction-of-end-member-s-spectra-from-different-types-of-rocks-94e4ed2f562f437084eba5c856e61664).
 
-Feel free to explore the repository to learn more about the methods and findings of our research!
+Feel free to explore the repository !
