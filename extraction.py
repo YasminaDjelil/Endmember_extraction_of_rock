@@ -23,145 +23,172 @@ SOFTWARE.
 """
 
 # necessary libraries
-import os
-import inspect
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.interpolate import interp1d
-import matplotlib.pyplot as plt
 import re
-from osgeo import gdal
-from sklearn.decomposition import NMF
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-from sklearn.decomposition import NMF
 import numpy as np
-from scipy.signal import savgol_filter
-import pysptools.eea as eea
+import matplotlib.pyplot as plt
+from osgeo import gdal
+from matplotlib import patches
 from sklearn.cluster import KMeans
-from matplotlib.colors import ListedColormap
-import matplotlib.patches as patches
-from sklearn.neighbors import NearestNeighbors
-from sklearn.metrics.pairwise import euclidean_distances
+import pysptools.eea as eea
 
-# necessary func
-def extract_wavelengths_from_header(header_file_path):
+# func
+
+def extract_envi_info(header_file_path):
+    patterns = {
+        "samples": re.compile(r'samples\s*=\s*(\d+)', re.IGNORECASE),
+        "bands": re.compile(r'bands\s*=\s*(\d+)', re.IGNORECASE),
+        "lines": re.compile(r'lines\s*=\s*(\d+)', re.IGNORECASE),
+        "wavelengths": re.compile(r'\d+\.\d+')
+    }
+
     with open(header_file_path, 'r') as file:
-        content = file.read()
-    wavelengths = re.findall(r'\d+\.\d+', content)
-    wavelengths = [float(wavelength) for wavelength in wavelengths]
-    return wavelengths
-
-def extract_envi_info_from_file(file_path):
-    # Extract (samples, lines, bands)
-    sample_pattern = re.compile(r'samples\s*=\s*(\d+)', re.IGNORECASE)
-    band_pattern = re.compile(r'bands\s*=\s*(\d+)', re.IGNORECASE)
-    line_pattern = re.compile(r'lines\s*=\s*(\d+)', re.IGNORECASE)
-
-    with open(file_path, 'r') as file:
         header_text = file.read()
 
-    samples_match = sample_pattern.search(header_text)
-    bands_match = band_pattern.search(header_text)
-    lines_match = line_pattern.search(header_text)
-
-    samples = int(samples_match.group(1)) if samples_match else None
-    bands = int(bands_match.group(1)) if bands_match else None
-    lines = int(lines_match.group(1)) if lines_match else None
-    # wavelenght
-    wavelengths = re.findall(r'\d+\.\d+', header_text)
-    wavelengths = [float(wavelength) for wavelength in wavelengths]
-
+    samples = int(patterns["samples"].search(header_text).group(1))
+    bands = int(patterns["bands"].search(header_text).group(1))
+    lines = int(patterns["lines"].search(header_text).group(1))
+    wavelengths = [float(w) for w in patterns["wavelengths"].findall(header_text)]
 
     return samples, bands, lines, wavelengths
 
-def load_raw_hyperspectral_data(raw_path, hdr_path, wavelengths, bands, lines, samples, crop_region):
+def load_raw_hyperspectral_data(raw_path, crop_region=None):
+    raw_dataset = gdal.Open(raw_path)
+    bands = raw_dataset.RasterCount
+    lines = raw_dataset.RasterYSize
+    samples = raw_dataset.RasterXSize
 
     raw_data = np.empty((bands, lines, samples), dtype=np.uint16)
-
-    # Open the file using gdal
-    raw_dataset = gdal.Open(raw_path)
-
     for i in range(bands):
-        band_data = raw_dataset.GetRasterBand(i+1).ReadAsArray()
+        band_data = raw_dataset.GetRasterBand(i + 1).ReadAsArray()
         raw_data[i, :, :] = band_data
 
     raw_data = np.transpose(raw_data, (1, 2, 0))
-    # wavelenght info
-    print("start wavelength =", wavelengths[0])
-    print("end wavelength =", wavelengths[-1])
-    print("step wavelength =", wavelengths[1]-wavelengths[0])
 
-    # cropping
     if crop_region:
-        x_s, y_s, x_e, y_e = crop_region
-        cropped_data = raw_data[y_s:y_e, x_s:x_e, :]
-        return cropped_data
-    else:
-        # Reshape
-        raw_data = raw_data.reshape(lines, samples, bands)
-        return raw_data
-      
-def plot_data_band(wavelengths, data, Band_index):
+        x, y, width, height = crop_region
+        raw_data = raw_data[y:y + height, x:x + width, :]
 
-  band_data = data[:, :, Band_index]
+    return raw_data
 
-  # Plot
-  plt.figure(figsize=(10, 8))
-  plt.imshow(band_data, cmap='gist_gray')
-  plt.colorbar(label='Pixel Intensity')
-  plt.title('Data from Band {} (Wavelength: {} nm)'.format(Band_index + 1, wavelengths[Band_index]))
+def em_extraction(data, band_index, pixel_coordinates, wavelengths, a):
+    band_data = data[:, :, band_index]
 
-
-  plt.show()
-
-def EM_extraction(header_path, data, Band_index, pixel_coordinates, wavelengths, A):
-    band_data = data[:, :, Band_index]
-
-    # Data preview
     plt.figure(figsize=(10, 8))
     plt.imshow(band_data, cmap='gist_gray')
     plt.colorbar(label='Pixel Intensity')
-    plt.title('Data from Band {} (Wavelength: {} nm)'.format(Band_index + 1, wavelengths[Band_index]))
+    plt.title(f'Data from Band {band_index + 1} (Wavelength: {wavelengths[band_index]} nm)')
 
     for coord in pixel_coordinates:
         x, y = coord
         plt.scatter(x, y, marker='x', label='Pixel Coordinates')
-
-        x_start, x_end = max(0, int(x - (A//2))), min(data.shape[1], int(x + (A//2)))
-        y_start, y_end = max(0, int(y - (A//2))), min(data.shape[0], int(y + (A//2)))
+        x_start, x_end = max(0, int(x - (a / 2) - 1)), min(data.shape[1], int(x + (a / 2)))
+        y_start, y_end = max(0, int(y - (a / 2) - 1)), min(data.shape[0], int(y + (a / 2)))
         rect = patches.Rectangle((x_start - 0.5, y_start - 0.5), x_end - x_start, y_end - y_start,
                                   linewidth=1, edgecolor='r', facecolor='none')
         plt.gca().add_patch(rect)
 
-    plt.legend(loc='lower center', bbox_to_anchor=(0.5, -0.2), shadow=True, ncol=len(pixel_coordinates)//2)
+    plt.legend(loc='lower center', bbox_to_anchor=(0.5, -0.2), shadow=True, ncol=len(pixel_coordinates) // 2)
     plt.show()
 
     spectra_array = []
-    spectra_array_n = []
     for coord in pixel_coordinates:
         x, y = coord
-
-        x_start, x_end = max(0, int(x - (A//2))), min(data.shape[1], int(x + (A//2)))
-        y_start, y_end = max(0, int(y - (A//2))), min(data.shape[0], int(y + (A//2)))
+        x_start, x_end = max(0, int(x - (a / 2) - 1)), min(data.shape[1], int(x + (a / 2)))
+        y_start, y_end = max(0, int(y - (a / 2) - 1)), min(data.shape[0], int(y + (a / 2)))
         spectra_square = data[y_start:y_end, x_start:x_end]
+        mean_spectrum = np.mean(spectra_square, axis=(0, 1))
+        mean_spectrum = (mean_spectrum - np.min(mean_spectrum)) / (np.max(mean_spectrum) - np.min(mean_spectrum))
+        spectra_array.append(mean_spectrum)
 
-        spectrum = np.mean(spectra_square, axis=(0, 1))
-        # Normalize
-        mean_spectrum = (spectrum - np.min(spectrum)) / (np.max(spectrum) - np.min(spectrum))
-        spectra_array_n.append(mean_spectrum)
-        spectra_array.append(spectrum)
-
-    # Plot the spectra
     plt.figure(figsize=(8, 6))
     plt.title('Spectra of Specified Pixels')
     for i, coord in enumerate(pixel_coordinates):
         x, y = coord
         plt.plot(wavelengths, spectra_array[i], label=f'Pixel {x}, {y} Spectrum')
+    plt.xlabel('Wavelength (nm)')
+    plt.ylabel('Intensity')
+    plt.legend(loc='lower center', bbox_to_anchor=(0.9, -0.2), shadow=True, ncol=len(pixel_coordinates) // 2)
+    plt.show()
+
+    return np.array(spectra_array)
+
+def perform_kmeans(data, n_clusters):
+    if len(data.shape) == 3:
+        samples = data.shape[0] * data.shape[1]
+        features = data.shape[2]
+        data = data.reshape(samples, features)
+    elif len(data.shape) != 2:
+        raise ValueError("Input data should be a 2D or 3D array")
+
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0)
+    kmeans.fit(data)
+    em_kmeans = kmeans.cluster_centers_
+
+    em_kmeans_normalized = (em_kmeans - np.min(em_kmeans, axis=0)) / (np.max(em_kmeans, axis=0) - np.min(em_kmeans, axis=0))
+    return em_kmeans, em_kmeans_normalized
+
+def plot_spectra(endmember_spectra, reconstructed_spectra, wavelengths):
+
+    plt.figure(figsize=(10, 8))
+    plt.title('Reconstructed and Original Endmember Spectra')
+
+    for i, spectrum in enumerate(reconstructed_spectra):
+        plt.plot(wavelengths, spectrum, label=f'Reconstructed Endmember {i + 1}')
+
+    for j, spectrum in enumerate(endmember_spectra):
+        plt.plot(wavelengths, spectrum, '+', label=f'Original Endmember {j + 1}')
 
     plt.xlabel('Wavelength (nm)')
     plt.ylabel('Intensity')
-    plt.legend(loc='lower center', bbox_to_anchor=(0.9, -0.2), shadow=True, ncol=len(pixel_coordinates)//2)
+    plt.legend()
+    plt.grid(True)
     plt.show()
 
-    return np.array(spectra_array_n), np.array(spectra_array)
+def plot_abundance_map(raw_data, em, colors, wavelengths_dim):
 
+    distances = np.linalg.norm(raw_data.reshape(-1, wavelengths_dim, 1) - em.T, axis=1)
+    closest_clusters = np.argmin(distances, axis=1)
+
+    abundance_map = closest_clusters.reshape(raw_data.shape[:2])
+
+    cluster_colors = colors
+
+    plt.figure(figsize=(12, 9))
+    cmap = ListedColormap(cluster_colors)
+    plt.imshow(abundance_map, cmap=cmap, interpolation='nearest')
+    plt.axis('off')
+    plt.show()
+
+
+
+##############################
+
+# files path
+raw_path = "/content/drive/MyDrive/Thesis/Yasmina stuff/Rocks/correctedCapture/Corrected.raw"
+hdr_path = "/content/drive/MyDrive/Thesis/Yasmina stuff/Rocks/correctedCapture/Corrected.hdr"
+
+# get files info from hdr file
+samples, bands, lines, wavelength = extract_envi_info(hdr_path)
+
+# load data and crop in necessary
+raw_data = load_raw_hyperspectral_data(raw_path, (600, 35, 200, 395)) # crop(start x, start y, end x, end y)
+
+# manual extraction and plot
+A = 5 # the lenght in pixels of the sice of the area
+pixel_coordinates = [ (50, 160), (105, 260)] # endmember coordinates
+EM_spectra = em_extraction(raw_data, 50, pixel_coordinates, wavelength,A)
+
+# N-findr extraction using pysptools module and plot
+EM_NFINDR = eea.NFINDR().extract(M=raw_data, q=2, transform=None, maxit=None, normalize=True, mask=None)
+plot_spectra(EM_spectra, EM_NFINDR, wavelength)
+
+# PPI extraction using pysptools module and plot
+EM_PPI = eea.PPI().extract(M=raw_data, q=2, numSkewers=1000, normalize=True, mask=None)
+plot_spectra(EM_spectra, EM_PPI, wavelength)
+
+# K-means extraction and plot
+EM_kmeans, EM_kmeans_n = perform_kmeans(raw_data, 2)
+plot_spectra(EM_spectra, EM_kmeans_n, wavelength)
+
+# plot spectral signature map
+plot_abundance_map(raw_data, EM_kmeans, ['wheat', 'cadetblue'], bands)
